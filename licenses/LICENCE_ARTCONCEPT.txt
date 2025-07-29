@@ -1,0 +1,5 @@
+This project is a combination of technology and artistic intention.
+It thrives through the participation of real people and is not meant to be commercialized,
+but rather developed further as a community effort.
+Please respect this context when forking or building upon it.
+
