@@ -34,25 +34,25 @@ impl PortHandler {
                     // NodeInfo-Task starten
                     let writer_clone = Arc::clone(&writer);
                     let port_name_clone = self.port_name.clone();
-                    tokio::spawn(async move {
-                        let mut interval = tokio::time::interval(Duration::from_secs(600));
-                        loop {
-                            interval.tick().await;
-                            let cmd = b"{\"request\": \"node_info\"}\n";
+                    // tokio::spawn(async move {
+                    //     let mut interval = tokio::time::interval(Duration::from_secs(600));
+                    //     loop {
+                    //         interval.tick().await;
+                    //         let cmd = b"{\"request\": \"node_info\"}\n";
 
-                            let mut w = writer_clone.lock().await;
-                            if let Err(e) = w.write_all(cmd).await {
-                                log::warn!("[{}] Fehler beim Schreiben: {:?}", port_name_clone, e);
-                                break;
-                            }
-                            if let Err(e) = w.flush().await {
-                                log::warn!("[{}] Fehler beim Flush: {:?}", port_name_clone, e);
-                                break;
-                            }
+                    //         let mut w = writer_clone.lock().await;
+                    //         if let Err(e) = w.write_all(cmd).await {
+                    //             log::warn!("[{}] Fehler beim Schreiben: {:?}", port_name_clone, e);
+                    //             break;
+                    //         }
+                    //         if let Err(e) = w.flush().await {
+                    //             log::warn!("[{}] Fehler beim Flush: {:?}", port_name_clone, e);
+                    //             break;
+                    //         }
 
-                            log::info!("[{}] NodeInfo angefragt", port_name_clone);
-                        }
-                    });
+                    //         log::info!("[{}] NodeInfo angefragt", port_name_clone);
+                    //     }
+                    // });
 
                     // Lesen starten
                     if let Err(e) = self.read_loop(framed).await {
