@@ -1,11 +1,13 @@
-use tokio_serial::{SerialPortBuilderExt, SerialStream};
-use tokio_util::codec::{FramedRead, LinesCodec};
-use tokio_stream::StreamExt;
+use std::sync::Arc;
 use tokio::io::{AsyncWriteExt, BufWriter};
-use crate::message::{MeshMessage, PortMessage};
-use crate::event::Event;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{mpsc::UnboundedSender, Mutex};
 use tokio::time::{sleep, Duration};
+use tokio_stream::StreamExt;
+use tokio_serial::{SerialPortBuilderExt};
+use tokio_util::codec::{FramedRead, LinesCodec};
+
+use crate::event::Event;
+use crate::message::{MeshMessage, PortMessage};
 
 pub struct PortHandler {
     port_name: String,
@@ -25,30 +27,34 @@ impl PortHandler {
                 Ok(port) => {
                     log::info!("[{}] Verbunden", self.port_name);
 
-                    // Aufteilen in Reader + Writer
                     let (reader, writer) = tokio::io::split(port);
                     let framed = FramedRead::new(reader, LinesCodec::new());
-                    let mut writer = BufWriter::new(writer);
+                    let writer = Arc::new(Mutex::new(BufWriter::new(writer)));
 
-                    // Task für NodeInfo-Anfragen starten
-                    let mut writer_clone = writer.clone();
+                    // NodeInfo-Task starten
+                    let writer_clone = Arc::clone(&writer);
                     let port_name_clone = self.port_name.clone();
                     tokio::spawn(async move {
                         let mut interval = tokio::time::interval(Duration::from_secs(600));
                         loop {
                             interval.tick().await;
                             let cmd = b"{\"request\": \"node_info\"}\n";
-                            match writer_clone.write_all(cmd).await {
-                                Ok(_) => log::info!("[{}] NodeInfo angefragt", port_name_clone),
-                                Err(e) => log::warn!("[{}] Fehler bei NodeInfo-Schreiben: {:?}", port_name_clone, e),
-                            }
-                            if writer_clone.flush().await.is_err() {
+
+                            let mut w = writer_clone.lock().await;
+                            if let Err(e) = w.write_all(cmd).await {
+                                log::warn!("[{}] Fehler beim Schreiben: {:?}", port_name_clone, e);
                                 break;
                             }
+                            if let Err(e) = w.flush().await {
+                                log::warn!("[{}] Fehler beim Flush: {:?}", port_name_clone, e);
+                                break;
+                            }
+
+                            log::info!("[{}] NodeInfo angefragt", port_name_clone);
                         }
                     });
 
-                    // Hauptleseschleife
+                    // Lesen starten
                     if let Err(e) = self.read_loop(framed).await {
                         log::warn!("[{}] Lesefehler: {:?}", self.port_name, e);
                     }
@@ -79,13 +85,14 @@ impl PortHandler {
                     };
                     let _ = self.sender.send(Event::MeshMessage(msg));
                 }
-                Err(e) => {
-                    let _ = self.sender.send(Event::Error(format!(
-                        "[{}] Lese- oder Decodefehler: {:?}",
-                        self.port_name, e
-                    )));
-                    return Err(e);
-                }
+                    Err(e) => {
+        let _ = self.sender.send(Event::Error(format!(
+            "[{}] Lese- oder Decodefehler: {:?}",
+            self.port_name, e
+        )));
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
+    }
+
             }
         }
 

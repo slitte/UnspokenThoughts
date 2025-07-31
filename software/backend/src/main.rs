@@ -42,7 +42,7 @@ async fn main() {
     }
 
     // Shutdown-Handler
-    let shutdown = tokio::spawn(async {
+    let mut shutdown = tokio::spawn(async {
         signal::ctrl_c().await.expect("Fehler beim Warten auf Ctrl+C");
         log::info!("Ctrl+C erkannt, beende...");
     });
