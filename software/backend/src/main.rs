@@ -14,16 +14,34 @@ use tokio::sync::mpsc;
 use tokio::signal;
 use logging::init_logging;
 
-const PORTS: [&str; 8] = [
-    "/dev/ttyUSB0", "/dev/ttyUSB1", "/dev/ttyUSB2", "/dev/ttyUSB3",
-    "/dev/ttyUSB4", "/dev/ttyUSB5", "/dev/ttyUSB6", "/dev/ttyUSB7",
-];
+use std::fs::OpenOptions;
+use std::io::Write;
+
+
+const PORTS: [&str; 1] = [
+    "/dev/UT_Long-Fast"];
 
 #[tokio::main]
 async fn main() {
     init_logging();
     let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
     let clients = Arc::new(Mutex::new(Vec::new()));
+
+    // Datei zum Mitschreiben der Events öffnen
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/home/schlitte/event_log.txt")
+        .expect("Konnte event_log.txt nicht öffnen");
+
+
+
+
+
+
+
+
+
 
     // TCP-Server starten
     let tcp_clients = Arc::clone(&clients);
@@ -58,6 +76,16 @@ async fn main() {
                     Event::Error(e) => log::warn!("[Fehler] {}", e),
                     Event::NodeInfo(info) => log::info!("[NodeInfo] {:?}", info),
                 }
+                
+                 // In Datei schreiben
+                if let Ok(json) = serde_json::to_string(&event) {
+                    if let Err(e) = writeln!(file, "{}", json) {
+                        log::warn!("Fehler beim Schreiben in Datei: {}", e);
+                    }
+                }
+
+
+
 
                 // TCP weiterleiten
                 let mut clients = clients.lock().await;
