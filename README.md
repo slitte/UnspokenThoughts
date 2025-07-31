@@ -1,17 +1,18 @@
-# UnspokenThougts
+# UnspokenThoughts 🌌
 
 **Every text message in the mesh is an unspoken thought —  
 fleeting like a shooting star, passing silently through the network.**
 
-This project transforms live messages from the Meshtastic network into a visual, interactive installation.  
-Each message triggers a shooting star in a stylized sky, powered by open hardware and open source software.
+This project transforms real-time messages from the [Meshtastic](https://meshtastic.org) network into an interactive visual installation.
 
-It’s not about content. It’s about presence.
+- 📡 **Mesh messages** become **shooting stars**
+- 💡 **Nodes** become **stars in the sky**
+- 🌀 The **network becomes alive**
 
-- Real-time messages become light.
-- Nodes become stars.
-- The mesh becomes alive.
+Built with:
+- 🦀 Rust (serial decoding, event routing, TCP interface)
+- 🎮 Godot (real-time 2D/3D visualization)
+- 🧩 Open hardware & open protocols
 
-Built with Rust, visualized with Godot, powered by the people.
-
-🌌  
+> It’s not about content.  
+> It’s about presence.
