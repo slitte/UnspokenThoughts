@@ -26,7 +26,7 @@ async fn main() {
     init_logging();
     let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
     let clients = Arc::new(Mutex::new(Vec::new()));
-    
+
     log::info!("Build-Trigger-Test");
     // Datei zum Mitschreiben der Events öffnen
     let mut file = OpenOptions::new()
@@ -71,12 +71,15 @@ async fn main() {
         tokio::select! {
             Some(event) = rx.recv() => {
                 match &event {
-                    Event::MeshMessage(msg) => {
-                        log::info!("[Sternschnuppe] Von {}: {}", msg.port, msg.raw);
-                    }
-                    Event::Error(e) => log::warn!("[Fehler] {}", e),
-                    Event::NodeInfo(info) => log::info!("[NodeInfo] {:?}", info),
-                }
+    Event::MeshMessage(msg) => {
+        log::info!("[Sternschnuppe] Von {}: {}", msg.port, msg.raw);
+    }
+    Event::TextMessage { port, message } => {
+        log::info!("[Text] {} → {}", port, message);
+    }
+    Event::Error(e) => log::warn!("[Fehler] {}", e),
+    Event::NodeInfo(info) => log::info!("[NodeInfo] {:?}", info),
+}
                 
                  // In Datei schreiben
                 if let Ok(json) = serde_json::to_string(&event) {

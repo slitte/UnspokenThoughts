@@ -3,7 +3,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::{mpsc::UnboundedSender, Mutex};
 use tokio::time::{sleep, Duration};
 use tokio_stream::StreamExt;
-use tokio_serial::{SerialPortBuilderExt};
+use tokio_serial::SerialPortBuilderExt;
 use tokio_util::codec::{FramedRead, LinesCodec};
 
 use crate::event::Event;
@@ -21,9 +21,7 @@ impl PortHandler {
 
     pub async fn run(&mut self) {
         loop {
-            match tokio_serial::new(&self.port_name, 921600)
-                .open_native_async()
-            {
+            match tokio_serial::new(&self.port_name, 115200).open_native_async() {
                 Ok(port) => {
                     log::info!("[{}] Verbunden", self.port_name);
 
@@ -34,25 +32,25 @@ impl PortHandler {
                     // NodeInfo-Task starten
                     let writer_clone = Arc::clone(&writer);
                     let port_name_clone = self.port_name.clone();
-                    // tokio::spawn(async move {
-                    //     let mut interval = tokio::time::interval(Duration::from_secs(600));
-                    //     loop {
-                    //         interval.tick().await;
-                    //         let cmd = b"{\"request\": \"node_info\"}\n";
+                    tokio::spawn(async move {
+                        let mut interval = tokio::time::interval(Duration::from_secs(600));
+                        loop {
+                            interval.tick().await;
+                            let cmd = b"{\"request\": \"node_info\"}\n";
 
-                    //         let mut w = writer_clone.lock().await;
-                    //         if let Err(e) = w.write_all(cmd).await {
-                    //             log::warn!("[{}] Fehler beim Schreiben: {:?}", port_name_clone, e);
-                    //             break;
-                    //         }
-                    //         if let Err(e) = w.flush().await {
-                    //             log::warn!("[{}] Fehler beim Flush: {:?}", port_name_clone, e);
-                    //             break;
-                    //         }
+                            let mut w = writer_clone.lock().await;
+                            if let Err(e) = w.write_all(cmd).await {
+                                log::warn!("[{}] Fehler beim Schreiben: {:?}", port_name_clone, e);
+                                break;
+                            }
+                            if let Err(e) = w.flush().await {
+                                log::warn!("[{}] Fehler beim Flush: {:?}", port_name_clone, e);
+                                break;
+                            }
 
-                    //         log::info!("[{}] NodeInfo angefragt", port_name_clone);
-                    //     }
-                    // });
+                            log::info!("[{}] NodeInfo angefragt", port_name_clone);
+                        }
+                    });
 
                     // Lesen starten
                     if let Err(e) = self.read_loop(framed).await {
@@ -77,7 +75,21 @@ impl PortHandler {
                     if text.trim().is_empty() {
                         continue;
                     }
-                    let parsed = serde_json::from_str::<MeshMessage>(&text).ok();
+
+                   let parsed = serde_json::from_str::<MeshMessage>(&text).ok();
+
+// Falls Textnachricht enthalten → eigenen Event senden
+if let Some(parsed_msg) = &parsed {
+    if let Some(text_msg) = &parsed_msg.text {
+        let _ = self.sender.send(Event::TextMessage {
+            port: self.port_name.clone(),
+            message: text_msg.clone(),
+        });
+        continue;
+    }
+}
+
+                    // Fallback: alles andere als MeshMessage weiterleiten
                     let msg = PortMessage {
                         port: self.port_name.clone(),
                         raw: text,
@@ -85,14 +97,13 @@ impl PortHandler {
                     };
                     let _ = self.sender.send(Event::MeshMessage(msg));
                 }
-                    Err(e) => {
-        let _ = self.sender.send(Event::Error(format!(
-            "[{}] Lese- oder Decodefehler: {:?}",
-            self.port_name, e
-        )));
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
-    }
-
+                Err(e) => {
+                    let _ = self.sender.send(Event::Error(format!(
+                        "[{}] Lese- oder Decodefehler: {:?}",
+                        self.port_name, e
+                    )));
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
+                }
             }
         }
 
