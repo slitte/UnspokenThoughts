@@ -54,7 +54,7 @@ async fn main() {
         _ = async {
             // Eventloop: Nachrichten empfangen, an alle TCP-Clients weiterleiten
             while let Some(event) = rx.recv().await {
-                log::info!("Empfangen von {}: {:?}", event.port, event.proto);
+                log::info!("Empfangen von {}: {:?}", event.port, event.event_type);
                 let mut clients = clients.lock().await;
                 clients.retain_mut(|stream| {
                     if let Ok(json) = serde_json::to_string(&event) {

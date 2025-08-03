@@ -8,7 +8,15 @@
 use serde::Serialize;
 
 #[derive(Debug, Serialize, Clone)]
+pub enum EventType {
+    DirectMeshPacket,   // oder MeshDirect
+    RelayedMeshPacket,  // oder MeshRelayed
+    NodeInfo,
+    Unknown,
+}
+#[derive(Debug, Serialize, Clone)]
 pub struct Event {
     pub port: String,
-    pub proto: String,
+    pub event_type: EventType,
+    // Optional: Zusatzinfos (from/to/text etc)
 }
