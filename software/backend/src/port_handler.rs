@@ -1,30 +1,39 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/
+//
 // src/port_handler.rs
 
 use tokio_serial::SerialPortBuilderExt;
 use tokio::sync::mpsc;
 use prost::Message;
-use crate::mesh_proto;
-use crate::Event;
-use crate::event::EventType;                       // ← neu
-use crate::mesh_proto::from_radio::PayloadVariant; // ← neu
+
 use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
-use std::time::Duration;  
-use futures::StreamExt;    // für .next()
+use futures::StreamExt;
+use std::time::Duration;
+
+use crate::{Event, mesh_proto};
+use crate::event::EventType;
+use crate::mesh_proto::from_radio::PayloadVariant;
 
 const BAUDRATE: u32 = 921600;
 
 pub async fn read_port(port_name: String, tx: mpsc::UnboundedSender<Event>) {
     loop {
-        match tokio_serial::new(&port_name, BAUDRATE)
-            .open_native_async() 
-        {
+        match tokio_serial::new(&port_name, BAUDRATE).open_native_async() {
             Ok(port) => {
                 log::info!("Lausche auf {}", port_name);
-                
-                // hier splitten wir nur einmal:
+
+                // ----------------------------
+                // Hier bauen wir den Codec:
+                let codec = LengthDelimitedCodec::builder()
+                    .length_field_length(2)   // 2-Byte Längenfeld
+                    .little_endian()          // little-endian
+                    .new_codec();
+
                 let (reader, _) = tokio::io::split(port);
-                // und wickeln den Reader in einen length-delimited Codec:
-                let mut lines = FramedRead::new(reader, LengthDelimitedCodec::new());
+                let mut lines = FramedRead::new(reader, codec);
+                // ----------------------------
 
                 while let Some(frame) = lines.next().await {
                     match frame {
