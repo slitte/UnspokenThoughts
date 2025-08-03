@@ -15,6 +15,7 @@ mod mesh_proto {
 }
 
 use tokio::sync::{mpsc, Mutex};
+use tokio::signal;
 use std::sync::Arc;
 use event::Event;
 use logging::init_logging;
@@ -22,7 +23,6 @@ use tcp_server::start_tcp_server;
 
 const PORTS: &[(&str, u32)] = &[
     ("/dev/UT_Long-Fast", 12345678),
-    ("/dev/UT_Slow-Fast", 87654321),
 ];
 
 const TCP_ADDR: &str = "127.0.0.1:9000";
@@ -41,29 +41,37 @@ async fn main() {
     });
 
     // Serial-Ports starten (gepaart)
-
     for (port, _node_id) in PORTS {
-      let tx = tx.clone();
-      let port = port.to_string();
-       tokio::spawn(async move {
-          port_handler::read_port(port, tx).await;
-    });
-}
-
-
-    // Eventloop: Nachrichten empfangen, an alle TCP-Clients weiterleiten
-    while let Some(event) = rx.recv().await {
-        log::info!("Empfangen von {}: {:?}", event.port, event.proto);
-        let mut clients = clients.lock().await;
-        clients.retain_mut(|stream| {
-            if let Ok(json) = serde_json::to_string(&event) {
-                match stream.try_write((json.clone() + "\n").as_bytes()) {
-                    Ok(_) => true,
-                    Err(_) => false,
-                }
-            } else {
-                false
-            }
+        let tx = tx.clone();
+        let port = port.to_string();
+        tokio::spawn(async move {
+            port_handler::read_port(port, tx).await;
         });
     }
+
+    // Eventloop und Signal-Handling (sauber beenden bei Strg+C)
+    tokio::select! {
+        _ = async {
+            // Eventloop: Nachrichten empfangen, an alle TCP-Clients weiterleiten
+            while let Some(event) = rx.recv().await {
+                log::info!("Empfangen von {}: {:?}", event.port, event.proto);
+                let mut clients = clients.lock().await;
+                clients.retain_mut(|stream| {
+                    if let Ok(json) = serde_json::to_string(&event) {
+                        match stream.try_write((json.clone() + "\n").as_bytes()) {
+                            Ok(_) => true,
+                            Err(_) => false,
+                        }
+                    } else {
+                        false
+                    }
+                });
+            }
+        } => {}
+        _ = signal::ctrl_c() => {
+            log::info!("Strg+C empfangen – Programm wird sauber beendet.");
+        }
+    }
+
+    log::info!("UnspokenThoughts ist beendet.");
 }
