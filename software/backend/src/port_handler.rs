@@ -7,9 +7,9 @@
 use tokio_serial::SerialPortBuilderExt;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::io::{AsyncBufReadExt,  BufReader};
+use tokio::time::{timeout, Duration};
 use prost::Message;
 use serde_json::Value;
-use std::time::Duration;
 
 use crate::{Event, mesh_proto};
 use crate::event::EventType;
@@ -66,34 +66,40 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                 let mut reader = BufReader::new(port);
 
                 loop {
-                    // 1) Bis SLIP_END einlesen (inklusive)
+                    // 1) SLIP-Paket bis zum End-Marker einlesen, mit Timeout
+                    log::debug!("[{}] Warten auf SLIP-Paket bis 0xC0…", port_name);
                     let mut slip_buf = Vec::new();
-                    match reader.read_until(SLIP_END, &mut slip_buf).await {
-                        Ok(0) => {
-                            log::warn!("[{}] EOF empfangen, breche intern ab", port_name);
+                    match timeout(Duration::from_secs(5), reader.read_until(SLIP_END, &mut slip_buf)).await {
+                        Ok(Ok(0)) => {
+                            log::warn!("[{}] EOF beim SLIP-Lesen", port_name);
                             break;
                         }
-                        Ok(_) => {
+                        Ok(Ok(_n)) => {
+                            log::debug!("[{}] SLIP read_until hat Bytes geliefert: {}", port_name, slip_buf.len());
                             // SLIP_END abschneiden, wenn vorhanden
                             if slip_buf.last() == Some(&SLIP_END) {
                                 slip_buf.pop();
                             }
                         }
-                        Err(e) => {
-                            log::warn!("[{}] Fehler beim SLIP read_until: {:?}", port_name, e);
+                        Ok(Err(e)) => {
+                            log::warn!("[{}] I/O-Fehler im SLIP-Lesen: {:?}", port_name, e);
                             break;
+                        }
+                        Err(_) => {
+                            log::warn!("[{}] SLIP-Lesen Timeout (5s), keine Daten", port_name);
+                            continue;
                         }
                     }
 
-                    // Leere SLIP-Pakete (Keep-alive) überspringen
                     if slip_buf.is_empty() {
+                        // Keep-alive, kein Inhalt
                         continue;
                     }
 
                     // 2) SLIP-Unescape
                     let frame = slip_unescape(&slip_buf);
 
-                    // 3) JSON oder Protobuf?
+                    // 3) Entscheiden, ob JSON oder Protobuf
                     if frame.first() == Some(&b'{') {
                         // JSON-Zeile
                         match serde_json::from_slice::<Value>(&frame) {
@@ -110,7 +116,7 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                             }
                         }
                     } else {
-                        // rohes Protobuf-Payload dekodieren
+                        // Protobuf-Frame
                         match mesh_proto::FromRadio::decode(&*frame) {
                             Ok(msg) => {
                                 if let Some(variant) = msg.payload_variant {
