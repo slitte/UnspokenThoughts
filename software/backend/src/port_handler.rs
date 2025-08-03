@@ -4,6 +4,8 @@
 // 
 // src/port_handler.rs
 
+// src/port_handler.rs
+
 use tokio_serial::{SerialPortBuilderExt, DataBits, Parity, StopBits, FlowControl};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
@@ -14,28 +16,51 @@ use crate::{Event, mesh_proto};
 use crate::event::EventType;
 use crate::mesh_proto::from_radio::PayloadVariant;
 
-const BAUDRATE: u32    = 921600;
-const MAX_FRAME: usize = 1024;  // Maximal plausibles Paket
-const MIN_FRAME: usize =   1;   // Minimal plausibles Paket
+const BAUDRATE: u32    = 115200;   // ← Prüfe hier unbedingt, ob dein Gerät wirklich mit 921600 spricht!
+const MAX_FRAME: usize = 1024;
+const MIN_FRAME: usize =   1;
 
 /// Synchronisiert bis zum nächsten 0x94C3-Header.
-/// Liest byte-weise und rückt das 2-Byte-Fenster immer um eins weiter.
+/// Loggt Start, erste Bytes, und alle 1000 Bytes ein Zwischen-Update.
 async fn sync_to_header<R: AsyncRead + Unpin>(
     reader: &mut BufReader<R>,
     port_name: &str
 ) -> io::Result<()> {
-    let mut window = [0u8; 2];
+    log::debug!("[{}] Beginne Header-Synchronisation…", port_name);
+
     // Erst mal zwei Bytes einlesen
+    let mut window = [0u8; 2];
     reader.read_exact(&mut window).await?;
+    log::debug!(
+        "[{}] Erstes Fenster: {:02X}{:02X}",
+        port_name,
+        window[0],
+        window[1]
+    );
+
+    let mut bytes_seen = 2usize;
     // Schiebe so lange, bis wir [0x94, 0xC3] haben
     while window != [0x94, 0xC3] {
-        // neues Byte ans Ende holen
-        window[0] = window[1];
+        // Neues Byte ans Ende holen
         reader.read_exact(&mut window[1..2]).await?;
+        window[0] = window[1];
+        bytes_seen += 1;
+
+        if bytes_seen % 1000 == 0 {
+            log::debug!(
+                "[{}] Noch kein Header nach {} Bytes, aktuelles Fenster: {:02X}{:02X}",
+                port_name,
+                bytes_seen,
+                window[0],
+                window[1]
+            );
+        }
     }
+
     log::debug!(
-        "[{}] Header-Marker synchronisiert: {:02X}{:02X}",
+        "[{}] Header gefunden nach {} Bytes: {:02X}{:02X}",
         port_name,
+        bytes_seen,
         window[0],
         window[1]
     );
@@ -57,16 +82,20 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                 let mut reader = BufReader::new(port);
 
                 loop {
-                    // === 1) Sync auf den 0x94C3-Header ===
+                    // ——— 1) Header-Sync ———
                     if let Err(e) = sync_to_header(&mut reader, &port_name).await {
                         log::warn!("[{}] Fehler beim Header-Sync: {:?}", port_name, e);
                         break;
                     }
 
-                    // === 2) Länge aus den nächsten 2 Bytes (Big-Endian) ===
+                    // ——— 2) Länge aus den nächsten 2 Bytes (Big-Endian) ———
                     let mut len_bytes = [0u8; 2];
                     if let Err(e) = reader.read_exact(&mut len_bytes).await {
-                        log::warn!("[{}] EOF/I/O-Error beim Length-Read: {:?}", port_name, e);
+                        log::warn!(
+                            "[{}] EOF/I/O-Error beim Length-Read: {:?}, breche Loop…",
+                            port_name,
+                            e
+                        );
                         break;
                     }
                     let len = u16::from_be_bytes(len_bytes) as usize;
@@ -88,26 +117,22 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                         continue;
                     }
 
-                    // === 3) Payload lesen ===
+                    // ——— 3) Payload lesen ———
                     let mut payload = vec![0u8; len];
                     if let Err(e) = reader.read_exact(&mut payload).await {
                         log::warn!("[{}] I/O-Error beim Payload-Lesen: {:?}", port_name, e);
                         break;
                     }
 
-                    // === 4) Protobuf dekodieren ===
+                    // ——— 4) Protobuf dekodieren & Event bauen ———
                     match mesh_proto::FromRadio::decode(&*payload) {
                         Ok(msg) => {
                             if let Some(variant) = msg.payload_variant {
-                                // === 5) Event erzeugen und senden ===
                                 let event = match variant {
                                     PayloadVariant::Packet(p) => {
                                         log::info!(
                                             "[{}] Packet: from={} to={} hop_limit={}",
-                                            port_name,
-                                            p.from,
-                                            p.to,
-                                            p.hop_limit
+                                            port_name, p.from, p.to, p.hop_limit
                                         );
                                         let ty = if p.hop_limit > 0 {
                                             EventType::RelayedMesh { from: p.from, to: p.to }
@@ -118,9 +143,7 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                                     }
                                     PayloadVariant::NodeInfo(info) => {
                                         log::info!(
-                                            "[{}] NodeInfo: node_id={}",
-                                            port_name,
-                                            info.num
+                                            "[{}] NodeInfo: node_id={}", port_name, info.num
                                         );
                                         Event {
                                             port:       port_name.clone(),
@@ -128,7 +151,7 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                                         }
                                     }
                                     _ => {
-                                        log::debug!("[{}] Unbehandelter PayloadVariant", port_name);
+                                        log::debug!("[{}] Unbehandelter Variant", port_name);
                                         Event { port: port_name.clone(), event_type: EventType::Unknown }
                                     }
                                 };
