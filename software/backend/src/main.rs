@@ -4,94 +4,117 @@
 //
 // Filename: <main.rs>
 
+mod port_handler;
+mod tcp_server;
 mod event;
 mod message;
 mod logging;
-mod port_handler;
-mod tcp_server;
 
-mod mesh_proto {
-    include!(concat!(env!("OUT_DIR"), "/meshtastic.rs"));
-}
+use crate::event::Event;
+use crate::port_handler::PortHandler;
+use crate::tcp_server::start_tcp_server;
 
-use tokio::sync::{mpsc, Mutex};
-use tokio::signal;
 use std::sync::Arc;
-use event::Event;
+use tokio::sync::Mutex;
+use tokio::sync::mpsc;
+use tokio::signal;
 use logging::init_logging;
-use tcp_server::start_tcp_server;
 
-const PORTS: &[(&str, u32)] = &[
-    ("/dev/UT_Long-Fast", 12345678),
-];
+use std::fs::OpenOptions;
+use std::io::Write;
 
-const TCP_ADDR: &str = "127.0.0.1:9000";
+
+const PORTS: [&str; 1] = [
+    "/dev/UT_Long-Fast"];
 
 #[tokio::main]
 async fn main() {
     init_logging();
-
-    log::info!("=== UnspokenThoughts v{} startet ===", env!("CARGO_PKG_VERSION"));
-    log::info!("Konfigurierte Ports und Node-IDs: {:?}", PORTS);
-
     let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
     let clients = Arc::new(Mutex::new(Vec::new()));
 
+    log::info!("Build-Trigger-Test");
+    // Datei zum Mitschreiben der Events öffnen
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/home/schlitte/event_log.txt")
+        .expect("Konnte event_log.txt nicht öffnen");
+
+
+
+
+
+
+
+
+
+
     // TCP-Server starten
-    log::info!("Starte TCP-Server auf {}", TCP_ADDR);
     let tcp_clients = Arc::clone(&clients);
     tokio::spawn(async move {
-        start_tcp_server(tcp_clients, TCP_ADDR).await;
+        start_tcp_server(tcp_clients).await;
     });
 
-    // Serial-Ports starten (gepaart)
-    for (port, node_id) in PORTS {
-        log::info!("Starte Task: {:?} mit Node ID {}", port, node_id);
+    // Ports starten
+    for port in PORTS {
         let tx = tx.clone();
         let port = port.to_string();
         tokio::spawn(async move {
-            port_handler::read_port(port, tx).await;
+            let mut handler = PortHandler::new(port, tx);
+            handler.run().await;
         });
     }
 
-    log::info!("Alle Tasks gestartet. Tritt in die Event-Schleife ein…");
+    // Shutdown-Handler
+    let mut shutdown = tokio::spawn(async {
+        signal::ctrl_c().await.expect("Fehler beim Warten auf Ctrl+C");
+        log::info!("Ctrl+C erkannt, beende...");
+    });
 
-    // Eventloop und Signal-Handling (sauber beenden bei Strg+C)
-    tokio::select! {
-        _ = async {
-            // Eventloop: Nachrichten empfangen, an alle TCP-Clients weiterleiten
-            while let Some(event) = rx.recv().await {
-                log::debug!("Event erhalten: {:?}", event);
-
-                let mut clients = clients.lock().await;
-                if clients.is_empty() {
-                    log::warn!("Kein Client verbunden – Event verworfen");
-                } else {
-                    // JSON-Seriierung
-                    match serde_json::to_string(&event) {
-                        Ok(json) => {
-                            log::info!("Verteile Event an {} Clients", clients.len());
-                            clients.retain_mut(|stream| {
-                                match stream.try_write((json.clone() + "\n").as_bytes()) {
-                                    Ok(_) => true,
-                                    Err(e) => {
-                                        log::error!("Fehler beim Senden an Client: {:?}", e);
-                                        false
-                                    }
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            log::error!("JSON-Serialisierung fehlgeschlagen: {:?}", e);
-                        }
+    // Event-Verarbeitung
+    loop {
+        tokio::select! {
+            Some(event) = rx.recv() => {
+                match &event {
+    Event::MeshMessage(msg) => {
+        log::info!("[Sternschnuppe] Von {}: {}", msg.port, msg.raw);
+    }
+    Event::TextMessage { port, message } => {
+        log::info!("[Text] {} → {}", port, message);
+    }
+    Event::Error(e) => log::warn!("[Fehler] {}", e),
+    Event::NodeInfo(info) => log::info!("[NodeInfo] {:?}", info),
+}
+                
+                 // In Datei schreiben
+                if let Ok(json) = serde_json::to_string(&event) {
+                    if let Err(e) = writeln!(file, "{}", json) {
+                        log::warn!("Fehler beim Schreiben in Datei: {}", e);
                     }
                 }
+
+
+
+
+                // TCP weiterleiten
+                let mut clients = clients.lock().await;
+                clients.retain_mut(|stream| {
+                    if let Ok(json) = serde_json::to_string(&event) {
+                        match stream.try_write((json + "\n").as_bytes()) {
+                            Ok(_) => true,
+                            Err(_) => false,
+                        }
+                    } else {
+                        false
+                    }
+                });
+            },
+            _ = &mut shutdown => {
+                break;
             }
-        } => {}
-        _ = signal::ctrl_c() => {
-            log::info!("Strg+C empfangen – Programm wird sauber beendet.");
         }
     }
 
-    log::info!("=== UnspokenThoughts ist beendet ===");
+    log::info!("Hauptloop beendet");
 }

@@ -5,20 +5,18 @@
 // Filename: <event.rs>
 
 
+use crate::message::{PortMessage};
 use serde::{Serialize, Deserialize};
-use serde_json::Value; // ← neu
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub enum EventType {
-    DirectMesh  { from: u32, to: u32 },
-    RelayedMesh { from: u32, to: u32 },
-    NodeInfo    { node_id: u32     },
-    NodeInfoJson(Value),            // ← neu
-    Unknown,
-}
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Event {
-    pub port: String,
-    pub event_type: EventType,
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Event {
+    MeshMessage(PortMessage),
+    NodeInfo(String),
+    Error(String),
+
+    TextMessage {
+        port: String,
+        message: String,
+    },
 }
