@@ -1,112 +1,74 @@
-use std::sync::Arc;
-use tokio::io::{AsyncWriteExt, BufWriter};
-use tokio::sync::{mpsc::UnboundedSender, Mutex};
-use tokio::time::{sleep, Duration};
-use tokio_stream::StreamExt;
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/
+//
+// Filename: <port_handler.rs>
+
+
+
+use bytes::{BytesMut, Buf};
+use tokio::io::AsyncReadExt;
 use tokio_serial::SerialPortBuilderExt;
-use tokio_util::codec::{FramedRead, LinesCodec};
+use tokio::sync::mpsc;
+use prost::Message; // <--- nicht vergessen!
+use crate::mesh_proto::FromRadio; // <--- passt für dein Projekt
+use crate::Event; // dein Event-Struct, ggf. anpassen
 
-use crate::event::Event;
-use crate::message::{MeshMessage, PortMessage};
+const BAUDRATE: u32 = 921600;
 
-pub struct PortHandler {
-    port_name: String,
-    sender: UnboundedSender<Event>,
-}
+pub async fn read_port(port_name: String, tx: mpsc::UnboundedSender<Event>) {
+    loop {
+        match tokio_serial::new(&port_name, BAUDRATE).open_native_async() {
+            Ok(mut port) => {
+                let mut buffer = BytesMut::with_capacity(4096);
+                log::info!("Lausche auf {}", port_name);
 
-impl PortHandler {
-    pub fn new(port_name: String, sender: UnboundedSender<Event>) -> Self {
-        Self { port_name, sender }
-    }
-
-    pub async fn run(&mut self) {
-        loop {
-            match tokio_serial::new(&self.port_name, 115200).open_native_async() {
-                Ok(port) => {
-                    log::info!("[{}] Verbunden", self.port_name);
-
-                    let (reader, writer) = tokio::io::split(port);
-                    let framed = FramedRead::new(reader, LinesCodec::new());
-                    let writer = Arc::new(Mutex::new(BufWriter::new(writer)));
-
-                    // NodeInfo-Task starten
-                    let writer_clone = Arc::clone(&writer);
-                    let port_name_clone = self.port_name.clone();
-                    tokio::spawn(async move {
-                        let mut interval = tokio::time::interval(Duration::from_secs(600));
-                        loop {
-                            interval.tick().await;
-                            let cmd = b"{\"request\": \"node_info\"}\n";
-
-                            let mut w = writer_clone.lock().await;
-                            if let Err(e) = w.write_all(cmd).await {
-                                log::warn!("[{}] Fehler beim Schreiben: {:?}", port_name_clone, e);
-                                break;
-                            }
-                            if let Err(e) = w.flush().await {
-                                log::warn!("[{}] Fehler beim Flush: {:?}", port_name_clone, e);
-                                break;
-                            }
-
-                            log::info!("[{}] NodeInfo angefragt", port_name_clone);
+                loop {
+                    let mut temp = [0u8; 512];
+                    let n = match port.read(&mut temp).await {
+                        Ok(0) => {
+                            log::warn!("[{}] Port geschlossen", port_name);
+                            break;
                         }
-                    });
-
-                    // Lesen starten
-                    if let Err(e) = self.read_loop(framed).await {
-                        log::warn!("[{}] Lesefehler: {:?}", self.port_name, e);
-                    }
-                }
-                Err(e) => {
-                    log::warn!("[{}] Öffnen fehlgeschlagen: {:?}", self.port_name, e);
-                    sleep(Duration::from_secs(2)).await;
-                }
-            }
-        }
-    }
-
-    async fn read_loop<S>(&mut self, mut lines: FramedRead<S, LinesCodec>) -> tokio::io::Result<()>
-    where
-        S: tokio::io::AsyncRead + Unpin,
-    {
-        while let Some(line) = lines.next().await {
-            match line {
-                Ok(text) => {
-                    if text.trim().is_empty() {
-                        continue;
-                    }
-
-                   let parsed = serde_json::from_str::<MeshMessage>(&text).ok();
-
-// Falls Textnachricht enthalten → eigenen Event senden
-if let Some(parsed_msg) = &parsed {
-    if let Some(text_msg) = &parsed_msg.text {
-        let _ = self.sender.send(Event::TextMessage {
-            port: self.port_name.clone(),
-            message: text_msg.clone(),
-        });
-        continue;
-    }
-}
-
-                    // Fallback: alles andere als MeshMessage weiterleiten
-                    let msg = PortMessage {
-                        port: self.port_name.clone(),
-                        raw: text,
-                        parsed,
+                        Ok(n) => n,
+                        Err(e) => {
+                            log::warn!("[{}] Lesefehler: {:?}", port_name, e);
+                            break;
+                        }
                     };
-                    let _ = self.sender.send(Event::MeshMessage(msg));
+                    buffer.extend_from_slice(&temp[..n]);
+
+                    // --- Protobuf-Framing ---
+                    while buffer.len() > 2 {
+                        let len = u16::from_le_bytes([buffer[0], buffer[1]]) as usize;
+                        if buffer.len() < 2 + len {
+                            break;
+                        }
+                        let msg_bytes = &buffer[2..2+len];
+
+                        match FromRadio::decode(msg_bytes) {
+                            Ok(msg) => {
+                                let event = Event {
+                                    port: port_name.clone(),
+                                    proto: format!("{:?}", msg),
+                                };
+                                let _ = tx.send(event);
+                            }
+                            Err(e) => {
+                                log::warn!("[{}] Dekodierungsfehler: {:?}", port_name, e);
+                            }
+                        }
+                        buffer.advance(2 + len);
+                    }
                 }
-                Err(e) => {
-                    let _ = self.sender.send(Event::Error(format!(
-                        "[{}] Lese- oder Decodefehler: {:?}",
-                        self.port_name, e
-                    )));
-                    return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
-                }
+
+                log::info!("[{}] Warte auf Reconnect...", port_name);
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            Err(e) => {
+                log::warn!("[{}] Konnte Port nicht öffnen: {:?}", port_name, e);
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         }
-
-        Ok(())
     }
 }
