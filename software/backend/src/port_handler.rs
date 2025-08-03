@@ -6,78 +6,99 @@
 
 use tokio_serial::SerialPortBuilderExt;
 use tokio::sync::mpsc;
+use tokio::io::AsyncReadExt;
+use bytes::{BytesMut, Buf};
 use prost::Message;
-
-use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
-use futures::StreamExt;
 use std::time::Duration;
 
-use crate::{Event, mesh_proto};
-use crate::event::EventType;
+use crate::event::{Event, EventType};
 use crate::mesh_proto::from_radio::PayloadVariant;
+use crate::mesh_proto::FromRadio;
 
 const BAUDRATE: u32 = 921600;
 
 pub async fn read_port(port_name: String, tx: mpsc::UnboundedSender<Event>) {
+    let mut buffer = BytesMut::with_capacity(4096);
+
     loop {
         match tokio_serial::new(&port_name, BAUDRATE).open_native_async() {
-            Ok(port) => {
+            Ok(mut port) => {
                 log::info!("Lausche auf {}", port_name);
 
-                // ----------------------------
-                // Hier bauen wir den Codec:
-                let codec = LengthDelimitedCodec::builder()
-                    .length_field_length(2)   // 2-Byte Längenfeld
-                    .little_endian()          // little-endian
-                    .new_codec();
+                loop {
+                    // --- Protobuf-Byte-Stream einlesen ---
+                    let mut tmp = [0u8; 512];
+                    let n = match port.read(&mut tmp).await {
+                        Ok(0) => {
+                            log::warn!("[{}] Port geschlossen", port_name);
+                            break;
+                        }
+                        Ok(n) => n,
+                        Err(e) => {
+                            log::warn!("[{}] Lesefehler: {:?}", port_name, e);
+                            break;
+                        }
+                    };
+                    buffer.extend_from_slice(&tmp[..n]);
 
-                let (reader, _) = tokio::io::split(port);
-                let mut lines = FramedRead::new(reader, codec);
-                // ----------------------------
+                    // --- Framing und Decode ---
+                    while buffer.len() > 2 {
+                        let len = u16::from_le_bytes([buffer[0], buffer[1]]) as usize;
+                        if buffer.len() < 2 + len {
+                            break;
+                        }
+                        // gesamtes Nachricht-Bytearray extrahieren
+                        let msg_bytes = buffer[2..2+len].to_vec();
+                        buffer.advance(2 + len);
 
-                while let Some(frame) = lines.next().await {
-                    match frame {
-                        Ok(bytes) => {
-                            match mesh_proto::FromRadio::decode(bytes.as_ref()) {
-                                Ok(msg) => {
-                                    if let Some(variant) = msg.payload_variant {
-                                        let event = match variant {
-                                            PayloadVariant::Packet(packet) => {
-                                                let from = packet.from;
-                                                let to   = packet.to;
-                                                let ty = if packet.hop_limit > 0 {
-                                                    EventType::RelayedMesh { from, to }
-                                                } else {
-                                                    EventType::DirectMesh  { from, to }
-                                                };
-                                                Event { port: port_name.clone(), event_type: ty }
-                                            }
-                                            PayloadVariant::NodeInfo(info) => {
-                                                Event {
-                                                    port:       port_name.clone(),
-                                                    event_type: EventType::NodeInfo { node_id: info.num },
+                        match FromRadio::decode(&*msg_bytes) {
+                            Ok(msg) => {
+                                if let Some(variant) = msg.payload_variant {
+                                    // je nach Variant ein Event bauen
+                                    let event = match variant {
+                                        PayloadVariant::Packet(packet) => {
+                                            // Direct vs. Relay anhand hop_limit
+                                            let evtype = if packet.hop_limit > 0 {
+                                                EventType::RelayedMesh {
+                                                    from: packet.from,
+                                                    to: packet.to,
                                                 }
+                                            } else {
+                                                EventType::DirectMesh {
+                                                    from: packet.from,
+                                                    to: packet.to,
+                                                }
+                                            };
+                                            Event { port: port_name.clone(), event_type: evtype }
+                                        }
+                                        PayloadVariant::NodeInfo(info) => {
+                                            Event {
+                                                port: port_name.clone(),
+                                                event_type: EventType::NodeInfo {
+                                                    node_id: info.num
+                                                },
                                             }
-                                            _ => Event {
+                                        }
+
+                                        _ => {
+                                            // alle anderen Varianten überspringen
+                                            Event {
                                                 port:       port_name.clone(),
                                                 event_type: EventType::Unknown,
-                                            },
-                                        };
-                                        let _ = tx.send(event);
-                                    }
-                                }
-                                Err(e) => {
-                                    log::warn!("[{}] Dekodierungsfehler: {:?}", port_name, e);
+                                            }
+                                        }
+                                    };
+                                    let _ = tx.send(event);
                                 }
                             }
-                        }
-                        Err(e) => {
-                            log::warn!("[{}] Framing-Fehler: {:?}", port_name, e);
+                            Err(e) => {
+                                log::warn!("[{}] Prost-Decode-Error: {:?}", port_name, e);
+                            }
                         }
                     }
                 }
 
-                log::info!("[{}] Stream beendet, warte auf Reconnect...", port_name);
+                log::info!("[{}] Warte auf Reconnect…", port_name);
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
             Err(e) => {

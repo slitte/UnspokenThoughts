@@ -5,18 +5,20 @@
 // Filename: <event.rs>
 
 
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
+use serde_json::Value; // ← neu
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum EventType {
-    DirectMesh { from: u32, to: u32 },
+    DirectMesh  { from: u32, to: u32 },
     RelayedMesh { from: u32, to: u32 },
-    NodeInfo   { node_id: u32, }, // Liste aktueller Node-IDs
+    NodeInfo    { node_id: u32     },
+    NodeInfoJson(Value),            // ← neu
     Unknown,
 }
-#[derive(Debug, Serialize, Clone)]
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Event {
     pub port: String,
     pub event_type: EventType,
-    // Optional: Zusatzinfos (from/to/text etc)
 }
