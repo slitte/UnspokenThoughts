@@ -1,22 +1,14 @@
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/
-//
-// Filename: <port_handler.rs>
-
-
+// src/port_handler.rs
 
 use bytes::{BytesMut, Buf};
 use tokio::io::AsyncReadExt;
 use tokio_serial::SerialPortBuilderExt;
 use tokio::sync::mpsc;
-use prost::Message; // <--- nicht vergessen!
-use crate::Event; // dein Event-Struct, ggf. anpassen
+use prost::Message;
 use crate::mesh_proto;
-use crate::event::EventType;
-
-
-
+use crate::Event;
+use crate::event::EventType;                       // ← neu
+use crate::mesh_proto::from_radio::PayloadVariant; // ← neu
 
 const BAUDRATE: u32 = 921600;
 
@@ -30,58 +22,44 @@ pub async fn read_port(port_name: String, tx: mpsc::UnboundedSender<Event>) {
                 loop {
                     let mut temp = [0u8; 512];
                     let n = match port.read(&mut temp).await {
-                        Ok(0) => {
-                            log::warn!("[{}] Port geschlossen", port_name);
-                            break;
-                        }
+                        Ok(0) => { log::warn!("[{}] Port geschlossen", port_name); break; }
                         Ok(n) => n,
-                        Err(e) => {
-                            log::warn!("[{}] Lesefehler: {:?}", port_name, e);
-                            break;
-                        }
+                        Err(e) => { log::warn!("[{}] Lesefehler: {:?}", port_name, e); break; }
                     };
                     buffer.extend_from_slice(&temp[..n]);
 
-                    // --- Protobuf-Framing ---
                     while buffer.len() > 2 {
                         let len = u16::from_le_bytes([buffer[0], buffer[1]]) as usize;
-                        if buffer.len() < 2 + len {
-                            break;
-                        }
+                        if buffer.len() < 2 + len { break; }
                         let msg_bytes = &buffer[2..2+len];
 
                         match mesh_proto::FromRadio::decode(msg_bytes) {
                             Ok(msg) => {
                                 if let Some(variant) = msg.payload_variant {
-                                    use crate::mesh_proto::from_radio::PayloadVariant;
-                                    match variant {
+                                    let event = match variant {
                                         PayloadVariant::Packet(packet) => {
-                                            let relay_type = if packet.hop_limit > 0 {
-                                                EventType::RelayedMeshPacket
+                                            let from = packet.from;
+                                            let to   = packet.to;
+                                            if packet.hop_limit > 0 {
+                                                Event { port: port_name.clone(),
+                                                        event_type: EventType::RelayedMesh { from, to } }
                                             } else {
-                                                EventType::DirectMeshPacket
-                                            };
-                                            let event = Event {
-                                                port: port_name.clone(),
-                                                event_type: relay_type,
-                                            };
-                                            let _ = tx.send(event);
+                                                Event { port: port_name.clone(),
+                                                        event_type: EventType::DirectMesh  { from, to } }
+                                            }
                                         }
-                                        PayloadVariant::NodeInfo(_) => {
-                                            let event = Event {
-                                                port: port_name.clone(),
-                                                event_type: EventType::NodeInfo,
-                                            };
-                                            let _ = tx.send(event);
+                                        PayloadVariant::NodeInfo(info) => {
+                                            // Annahme: NodeInfo hat Feld `node_id: u32`
+                                            Event { port: port_name.clone(),
+                                                    event_type: EventType::NodeInfo { node_id: info.num } }
                                         }
-             
                                         _ => {
-                                            log::debug!("[{}] Unbekannter Payload-Typ, wird übersprungen", port_name);
-                                            // Optional: Wenn du trotzdem ein Event schicken willst:
-                                             let event = Event { port: port_name.clone(), event_type: EventType::Unknown };
-                                             let _ = tx.send(event);
+                                            log::debug!("[{}] Unbekannter Payload-Typ, übersprungen", port_name);
+                                            Event { port: port_name.clone(),
+                                                    event_type: EventType::Unknown }
                                         }
-                                    }
+                                    };
+                                    let _ = tx.send(event);
                                 }
                             }
                             Err(e) => {

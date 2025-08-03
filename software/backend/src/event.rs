@@ -9,9 +9,9 @@ use serde::Serialize;
 
 #[derive(Debug, Serialize, Clone)]
 pub enum EventType {
-    DirectMeshPacket,   // oder MeshDirect
-    RelayedMeshPacket,  // oder MeshRelayed
-    NodeInfo,
+    DirectMesh { from: u32, to: u32 },
+    RelayedMesh { from: u32, to: u32 },
+    NodeInfo   { node_id: u32, }, // Liste aktueller Node-IDs
     Unknown,
 }
 #[derive(Debug, Serialize, Clone)]
