@@ -6,9 +6,9 @@
 
 use tokio_serial::{SerialPortBuilderExt, DataBits, Parity, StopBits, FlowControl};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::io::{AsyncReadExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 use prost::Message;
-use std::time::Duration;
+use std::{io, time::Duration};
 
 use crate::{Event, mesh_proto};
 use crate::event::EventType;
@@ -17,6 +17,30 @@ use crate::mesh_proto::from_radio::PayloadVariant;
 const BAUDRATE: u32    = 921600;
 const MAX_FRAME: usize = 1024;  // Maximal plausibles Paket
 const MIN_FRAME: usize =   1;   // Minimal plausibles Paket
+
+/// Synchronisiert bis zum nächsten 0x94C3-Header.
+/// Liest byte-weise und rückt das 2-Byte-Fenster immer um eins weiter.
+async fn sync_to_header<R: AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+    port_name: &str
+) -> io::Result<()> {
+    let mut window = [0u8; 2];
+    // Erst mal zwei Bytes einlesen
+    reader.read_exact(&mut window).await?;
+    // Schiebe so lange, bis wir [0x94, 0xC3] haben
+    while window != [0x94, 0xC3] {
+        // neues Byte ans Ende holen
+        window[0] = window[1];
+        reader.read_exact(&mut window[1..2]).await?;
+    }
+    log::debug!(
+        "[{}] Header-Marker synchronisiert: {:02X}{:02X}",
+        port_name,
+        window[0],
+        window[1]
+    );
+    Ok(())
+}
 
 pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
     loop {
@@ -33,64 +57,71 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                 let mut reader = BufReader::new(port);
 
                 loop {
-                    // === 1) Header lesen (4 Bytes, Big-Endian framing) ===
-                    let mut header = [0u8; 4];
-                    if let Err(e) = reader.read_exact(&mut header).await {
-                        log::warn!("[{}] EOF/I/O-Error beim Header-Lesen: {:?}", port_name, e);
+                    // === 1) Sync auf den 0x94C3-Header ===
+                    if let Err(e) = sync_to_header(&mut reader, &port_name).await {
+                        log::warn!("[{}] Fehler beim Header-Sync: {:?}", port_name, e);
                         break;
                     }
-                    log::debug!(
-                        "[{}] RAW HEADER: {:02X} {:02X} {:02X} {:02X}",
-                        port_name, header[0], header[1], header[2], header[3]
-                    );
 
-                    // 1a) Marker prüfen
-                    if header[0] != 0x94 || header[1] != 0xC3 {
-                        log::warn!(
-                            "[{}] Ungültiger Header-Marker {:02X}{:02X}, resync…",
-                            port_name, header[0], header[1]
-                        );
-                        continue;
+                    // === 2) Länge aus den nächsten 2 Bytes (Big-Endian) ===
+                    let mut len_bytes = [0u8; 2];
+                    if let Err(e) = reader.read_exact(&mut len_bytes).await {
+                        log::warn!("[{}] EOF/I/O-Error beim Length-Read: {:?}", port_name, e);
+                        break;
                     }
-
-                    // 1b) Länge aus Big-Endian-Bytes extrahieren
-                    let len = u16::from_be_bytes([header[2], header[3]]) as usize;
+                    let len = u16::from_be_bytes(len_bytes) as usize;
+                    log::debug!(
+                        "[{}] Gelesene Payload-Länge: {} (Bytes {:02X}{:02X})",
+                        port_name,
+                        len,
+                        len_bytes[0],
+                        len_bytes[1]
+                    );
                     if !(MIN_FRAME..=MAX_FRAME).contains(&len) {
                         log::warn!(
                             "[{}] Ungültige Länge {} (außerhalb {}–{}), resync…",
-                            port_name, len, MIN_FRAME, MAX_FRAME
+                            port_name,
+                            len,
+                            MIN_FRAME,
+                            MAX_FRAME
                         );
                         continue;
                     }
-                    log::debug!("[{}] Erkanntes Payload-Length: {} Bytes", port_name, len);
 
-                    // === 2) Payload lesen ===
+                    // === 3) Payload lesen ===
                     let mut payload = vec![0u8; len];
                     if let Err(e) = reader.read_exact(&mut payload).await {
                         log::warn!("[{}] I/O-Error beim Payload-Lesen: {:?}", port_name, e);
                         break;
                     }
 
-                    // === 3) Protobuf dekodieren ===
+                    // === 4) Protobuf dekodieren ===
                     match mesh_proto::FromRadio::decode(&*payload) {
                         Ok(msg) => {
                             if let Some(variant) = msg.payload_variant {
-                                // 4) Event erzeugen und senden
+                                // === 5) Event erzeugen und senden ===
                                 let event = match variant {
                                     PayloadVariant::Packet(p) => {
                                         log::info!(
                                             "[{}] Packet: from={} to={} hop_limit={}",
-                                            port_name, p.from, p.to, p.hop_limit
+                                            port_name,
+                                            p.from,
+                                            p.to,
+                                            p.hop_limit
                                         );
                                         let ty = if p.hop_limit > 0 {
                                             EventType::RelayedMesh { from: p.from, to: p.to }
                                         } else {
-                                            EventType::DirectMesh  { from: p.from, to: p.to }
+                                            EventType::DirectMesh { from: p.from, to: p.to }
                                         };
                                         Event { port: port_name.clone(), event_type: ty }
                                     }
                                     PayloadVariant::NodeInfo(info) => {
-                                        log::info!("[{}] NodeInfo: node_id={}", port_name, info.num);
+                                        log::info!(
+                                            "[{}] NodeInfo: node_id={}",
+                                            port_name,
+                                            info.num
+                                        );
                                         Event {
                                             port:       port_name.clone(),
                                             event_type: EventType::NodeInfo { node_id: info.num },
@@ -116,7 +147,11 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
             Err(e) => {
-                log::warn!("[{}] Port-Öffnen fehlgeschlagen: {:?}, retry in 2s…", port_name, e);
+                log::warn!(
+                    "[{}] Port-Öffnen fehlgeschlagen: {:?}, retry in 2s…",
+                    port_name,
+                    e
+                );
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
