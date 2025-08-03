@@ -35,7 +35,7 @@ impl JsonThenProto {
     fn new() -> Self {
         let inner = LengthDelimitedCodec::builder()
             .length_field_length(2)   // 2-Byte Präfix
-            .big_endian()             // Big-Endian
+            .little_endian()             // Big-Endian
             .new_codec();
         JsonThenProto { inner }
     }
