@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/
-//
+//  
 // src/port_handler.rs
 
 use tokio_serial::SerialPortBuilderExt;
@@ -91,11 +91,9 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                                     log::warn!("[{}] Ungültiges JSON: {} – {}", port_name, txt, e);
                                 }
                             }
-                            // noch eine JSON-Line prüfen
                             log::debug!("[{}] Noch {} Bytes im Buffer nach JSON-Split", port_name, buffer.len());
                             continue;
                         }
-                        // kein \n gefunden → unvollständige JSON-Zeile
                         break;
                     }
 
@@ -111,7 +109,7 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                         }
                         // Prefix lesen, aber nicht abschneiden
                         let prefix_bytes = [buffer[0], buffer[1]];
-                        let len = u16::from_le_bytes(prefix_bytes) as usize;
+                        let len = u16::from_be_bytes(prefix_bytes) as usize; // BE- statt LE-Endian
                         log::debug!(
                             "[{}] Gefundenes Prefix: bytes={:02X?}, len={}",
                             port_name,
@@ -128,8 +126,8 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                             break;
                         }
                         // Jetzt wirklich zuschneiden
-                        let _ = buffer.split_to(2);              // Prefix entfernen
-                        let msg_bytes = buffer.split_to(len);    // Payload herausziehen
+                        let _ = buffer.split_to(2);           // Prefix entfernen
+                        let msg_bytes = buffer.split_to(len); // Payload herausziehen
                         log::debug!(
                             "[{}] Extrahiertes Protobuf-Frame: {} Bytes",
                             port_name,
@@ -159,7 +157,7 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                                                 EventType::RelayedMesh { from: p.from, to: p.to }
                                             } else {
                                                 log::debug!("[{}] -> DirectMesh", port_name);
-                                                EventType::DirectMesh  { from: p.from, to: p.to }
+                                                EventType::DirectMesh { from: p.from, to: p.to }
                                             };
                                             Event { port: port_name.clone(), event_type: ty }
                                         }
@@ -187,7 +185,6 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                             }
                         }
 
-                        // Weiter prüfen, ob noch ein Frame ansteht…
                         log::debug!("[{}] Verbleibende Bytes im Buffer: {}", port_name, buffer.len());
                     }
                 }
