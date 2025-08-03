@@ -11,8 +11,12 @@ use tokio::io::AsyncReadExt;
 use tokio_serial::SerialPortBuilderExt;
 use tokio::sync::mpsc;
 use prost::Message; // <--- nicht vergessen!
-use crate::mesh_proto::FromRadio; // <--- passt für dein Projekt
 use crate::Event; // dein Event-Struct, ggf. anpassen
+use crate::mesh_proto;
+use crate::event::EventType;
+
+
+
 
 const BAUDRATE: u32 = 921600;
 
@@ -46,13 +50,39 @@ pub async fn read_port(port_name: String, tx: mpsc::UnboundedSender<Event>) {
                         }
                         let msg_bytes = &buffer[2..2+len];
 
-                        match FromRadio::decode(msg_bytes) {
+                        match mesh_proto::FromRadio::decode(msg_bytes) {
                             Ok(msg) => {
-                                let event = Event {
-                                    port: port_name.clone(),
-                                    proto: format!("{:?}", msg),
-                                };
-                                let _ = tx.send(event);
+                                if let Some(variant) = msg.payload_variant {
+                                    use crate::mesh_proto::from_radio::PayloadVariant;
+                                    match variant {
+                                        PayloadVariant::Packet(packet) => {
+                                            let relay_type = if packet.hop_limit > 0 {
+                                                EventType::RelayedMeshPacket
+                                            } else {
+                                                EventType::DirectMeshPacket
+                                            };
+                                            let event = Event {
+                                                port: port_name.clone(),
+                                                event_type: relay_type,
+                                            };
+                                            let _ = tx.send(event);
+                                        }
+                                        PayloadVariant::NodeInfo(_) => {
+                                            let event = Event {
+                                                port: port_name.clone(),
+                                                event_type: EventType::NodeInfo,
+                                            };
+                                            let _ = tx.send(event);
+                                        }
+             
+                                        _ => {
+                                            log::debug!("[{}] Unbekannter Payload-Typ, wird übersprungen", port_name);
+                                            // Optional: Wenn du trotzdem ein Event schicken willst:
+                                             let event = Event { port: port_name.clone(), event_type: EventType::Unknown };
+                                             let _ = tx.send(event);
+                                        }
+                                    }
+                                }
                             }
                             Err(e) => {
                                 log::warn!("[{}] Dekodierungsfehler: {:?}", port_name, e);
@@ -61,7 +91,6 @@ pub async fn read_port(port_name: String, tx: mpsc::UnboundedSender<Event>) {
                         buffer.advance(2 + len);
                     }
                 }
-
                 log::info!("[{}] Warte auf Reconnect...", port_name);
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
