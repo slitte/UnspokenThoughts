@@ -24,10 +24,16 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
 
         match tokio_serial::new(&port_name, BAUDRATE).open_native_async() {
             Ok(port) => {
-                log::info!  ("[{}] Port geöffnet, verwende LengthDelimitedCodec für Framing", port_name);
-                log::debug! ("[{}] Creating FramedRead with default LengthDelimitedCodec", port_name);
+                log::info!("[{}] Port geöffnet, konfiguriere LengthDelimitedCodec…", port_name);
+                
+                // WICHTIG: 2-Byte Little-Endian Präfix, kein Varint!
+                let codec = LengthDelimitedCodec::builder()
+                    .length_field_length(2)   // genau 2 Byte Länge
+                    .little_endian()          // little-endian
+                    .new_codec();
+                log::debug!("[{}] Codec: 2-Byte LE Length-Delimited", port_name);
 
-                let mut frames = FramedRead::new(port, LengthDelimitedCodec::new());
+                let mut frames = FramedRead::new(port, codec);
 
                 while let Some(frame_result) = frames.next().await {
                     log::debug!("[{}] Received Stream item", port_name);
@@ -35,7 +41,7 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                         Ok(buf) => {
                             let len = buf.len();
                             log::debug!(
-                                "[{}] ✔️ FramedRead delivered {} bytes (without prefix)",
+                                "[{}] ✔️ FramedRead delivered {} bytes (ohne Prefix)",
                                 port_name, len
                             );
                             log::trace!(
@@ -44,7 +50,6 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                                 &buf[..std::cmp::min(len, 32)]
                             );
 
-                            // Decode
                             log::debug!("[{}] Decoding Protobuf message…", port_name);
                             match mesh_proto::FromRadio::decode(buf.freeze()) {
                                 Ok(msg) => {
@@ -58,16 +63,10 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                                                     port_name, p.from, p.to, p.hop_limit
                                                 );
                                                 let ty = if p.hop_limit > 0 {
-                                                    log::debug!(
-                                                        "[{}] Classifying as RelayedMesh (hop_limit>0)",
-                                                        port_name
-                                                    );
+                                                    log::debug!("[{}] Klassifiziere als RelayedMesh", port_name);
                                                     EventType::RelayedMesh { from: p.from, to: p.to }
                                                 } else {
-                                                    log::debug!(
-                                                        "[{}] Classifying as DirectMesh (hop_limit=0)",
-                                                        port_name
-                                                    );
+                                                    log::debug!("[{}] Klassifiziere als DirectMesh", port_name);
                                                     EventType::DirectMesh  { from: p.from, to: p.to }
                                                 };
                                                 Event { port: port_name.clone(), event_type: ty }
@@ -81,19 +80,16 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                                             }
                                             other => {
                                                 log::warn!(
-                                                    "[{}] Unbehandelter PayloadVariant::{:?}, sende Unknown-Event",
+                                                    "[{}] Unbehandelter PayloadVariant::{:?}",
                                                     port_name, other
                                                 );
-                                                Event {
-                                                    port:       port_name.clone(),
-                                                    event_type: EventType::Unknown,
-                                                }
+                                                Event { port: port_name.clone(), event_type: EventType::Unknown }
                                             }
                                         };
-
-                                        match tx.send(event) {
-                                            Ok(_)  => log::debug!("[{}] Event erfolgreich gesendet", port_name),
-                                            Err(e) => log::error!("[{}] Fehler beim Senden des Events: {:?}", port_name, e),
+                                        if let Err(e) = tx.send(event) {
+                                            log::error!("[{}] Fehler beim Senden des Events: {:?}", port_name, e);
+                                        } else {
+                                            log::debug!("[{}] Event erfolgreich gesendet", port_name);
                                         }
                                     } else {
                                         log::debug!("[{}] Nachricht ohne PayloadVariant erhalten", port_name);
