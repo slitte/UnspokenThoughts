@@ -10,6 +10,7 @@ use tokio_util::codec::{Decoder, FramedRead, LengthDelimitedCodec};
 use futures::StreamExt;
 use prost::Message;
 use bytes::BytesMut;
+use bytes::Buf;
 use serde_json::Value;
 use std::io;
 use std::time::Duration;
@@ -19,14 +20,16 @@ use crate::event::EventType;
 use crate::mesh_proto::from_radio::PayloadVariant;
 
 const BAUDRATE: u32 = 921600;
+/// Maximale plausible Protobuf-Payload-Größe in Bytes (einstellbar)
+const MAX_PAYLOAD: usize = 1024;
 
-/// Ein Stream-Item: Entweder ein JSON-Value oder rohes Protobuf-Frame
+/// Entweder eine JSON-Zeile oder ein rohes Protobuf-Frame
 enum Mixed {
     Json(Value),
     Proto(BytesMut),
 }
 
-/// Kombinierter Decoder: fängt JSON-Lines ab, ansonsten Protobuf-Frames mit 2-Byte BE-Präfix
+/// Decoder, der zuerst JSON-Lines abfängt, sonst 2-Byte LE Protobuf-Frames
 struct JsonThenProto {
     inner: LengthDelimitedCodec,
 }
@@ -34,8 +37,8 @@ struct JsonThenProto {
 impl JsonThenProto {
     fn new() -> Self {
         let inner = LengthDelimitedCodec::builder()
-            .length_field_length(2)   // 2-Byte Präfix
-            .little_endian()             // Big-Endian
+            .length_field_length(2)   // genau 2 Byte Präfix
+            .little_endian()          // Little-Endian wie euer Gerät
             .new_codec();
         JsonThenProto { inner }
     }
@@ -46,31 +49,48 @@ impl Decoder for JsonThenProto {
     type Error = io::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, io::Error> {
-        // 1) JSON abfangen: wenn Buffer mit '{' beginnt
+        // --- 1) JSON abfangen ---
         if src.first().copied() == Some(b'{') {
             if let Some(pos) = src.iter().position(|&b| b == b'\n') {
-                let line = src.split_to(pos + 1);
+                let line = src.split_to(pos+1);
+                // immer ablösen, auch bei Fehlern
                 match serde_json::from_slice::<Value>(&line) {
-                    Ok(json) => return Ok(Some(Mixed::Json(json))),
-                    Err(e) => {
-                        log::warn!("Ungültiges JSON im Stream: {} – überspringe", e);
+                    Ok(json)  => return Ok(Some(Mixed::Json(json))),
+                    Err(e)    => {
+                        log::warn!("Ungültiges JSON im Stream: {} – verwerfe Zeile", e);
+                        // JSON-Zeile weg, dann neu versuchen
                         return Ok(None);
                     }
                 }
             }
+            // kein kompletter JSON-Line da → nix machen
             return Ok(None);
         }
 
-        // 2) sonst Protobuf-Frame
+        // --- 2) Prüfe auf plausibles 2-Byte-Prefix ---
+        if src.len() >= 2 {
+            let prefix = [src[0], src[1]];
+            let len = u16::from_le_bytes(prefix) as usize;
+            log::trace!("Candidate Prefix: {:02X?} → len={}", prefix, len);
+            if len == 0 || len > MAX_PAYLOAD {
+                // offensichtlich Müll im Buffer, einen Byte skippen und resync
+                log::warn!("Unplausibles Prefix {:?} (len={}), resync +1 byte", prefix, len);
+                src.advance(1);
+                return Ok(None);
+            }
+        }
+
+        // --- 3) Protobuf-Frame via inner decoder ---
         if let Some(frame) = self.inner.decode(src)? {
             return Ok(Some(Mixed::Proto(frame)));
         }
+
         Ok(None)
     }
 }
 
-/// Liest kontinuierlich von der seriellen Schnittstelle, parst JSON- und Protobuf-Nachrichten
-/// und sendet entsprechende Events über `tx`.
+/// Liest fortlaufend von der seriellen Schnittstelle, parst JSON und Protobuf
+/// und sendet eure Events über `tx`.
 pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
     loop {
         log::info!("Versuche Port \"{}\" mit {} Baud zu öffnen…", port_name, BAUDRATE);
@@ -82,7 +102,6 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                 while let Some(item) = frames.next().await {
                     match item {
                         Ok(Mixed::Json(val)) => {
-                            // JSON als EventType::NodeInfoJson
                             log::debug!("[{}] JSON empfangen: {}", port_name, val);
                             let event = Event {
                                 port:       port_name.clone(),
