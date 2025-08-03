@@ -14,81 +14,61 @@ use crate::{Event, mesh_proto};
 use crate::event::EventType;
 use crate::mesh_proto::from_radio::PayloadVariant;
 
-const BAUDRATE: u32   = 921600;
-const START1:  u8     = 0x94;
-const START2:  u8     = 0xC3;
-const MAX_PAYLOAD: usize = 512;
+const BAUDRATE: u32      = 921600;
+const MAX_FRAME: usize   = 1024;      // maximal plausibles Paket
+const MIN_FRAME: usize   = 1;         // minimal plausibles Paket
 
 pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
     loop {
-        log::info!("Versuche {}, {} Baud (8N1, no flow)…", port_name, BAUDRATE);
+        log::info!("Öffne {} mit {} Baud (Raw-Proto)…", port_name, BAUDRATE);
         let builder = tokio_serial::new(&port_name, BAUDRATE)
             .data_bits(DataBits::Eight)
             .parity(Parity::None)
             .stop_bits(StopBits::One)
             .flow_control(FlowControl::None);
-
+        
         match builder.open_native_async() {
             Ok(port) => {
-                log::info!("[{}] Port geöffnet, starte Streaming-Protokoll…", port_name);
+                log::info!("[{}] Port geöffnet, lese Raw-Proto-Frames…", port_name);
                 let mut reader = BufReader::new(port);
 
-                'inner: loop {
-                    // ——— 1) Suche START1 ———
-                    let mut byte = [0u8; 1];
-                    loop {
-                        if let Err(e) = reader.read_exact(&mut byte).await {
-                            log::warn!("[{}] I/O beim Lesen: {:?}", port_name, e);
-                            break 'inner;
-                        }
-                        if byte[0] == START1 {
-                            break;
+                loop {
+                    // 1) Peek 2 bytes für die Länge
+                    let mut header = [0u8; 2];
+                    if let Err(e) = reader.read_exact(&mut header).await {
+                        log::warn!("[{}] EOF oder I/O-Error beim Lesen des Headers: {:?}", port_name, e);
+                        break;
+                    }
+
+                    // 2) Interpretiere Big-Endian zuerst
+                    let mut len = u16::from_be_bytes(header) as usize;
+                    // falls unplausibel, versuch Little-Endian
+                    if len < MIN_FRAME || len > MAX_FRAME {
+                        let len_le = u16::from_le_bytes(header) as usize;
+                        if len_le >= MIN_FRAME && len_le <= MAX_FRAME {
+                            log::debug!("[{}] Länge per BE invalid ({}), nutze LE={}", port_name, len, len_le);
+                            len = len_le;
                         } else {
-                            // Debug-Text
-                            log::debug!("[{}] Debug-Byte: 0x{:02X}", port_name, byte[0]);
+                            log::warn!(
+                                "[{}] Ungültige Länge beider Endians: BE={} LE={} → resync 1 Byte",
+                                port_name, len, len_le
+                            );
+                            // schiebe um 1 Byte weiter und versuche neu
+                            // (hier: einfach weiter im Loop, das Header-Byte 1 haben wir schon verbraucht)
+                            continue;
                         }
                     }
 
-                    // ——— 2) Prüfe START2 ———
-                    if let Err(e) = reader.read_exact(&mut byte).await {
-                        log::warn!("[{}] I/O beim Lesen von START2: {:?}", port_name, e);
-                        break 'inner;
-                    }
-                    if byte[0] != START2 {
-                        log::warn!(
-                            "[{}] Ungültiges START2: 0x{:02X}, resync…",
-                            port_name,
-                            byte[0]
-                        );
-                        continue 'inner;
-                    }
+                    log::debug!("[{}] Framing-Länge erkannt: {} Bytes", port_name, len);
 
-                    // ——— 3) Lese 2-Byte Länge (Big-Endian) ———
-                    let mut len_bytes = [0u8; 2];
-                    if let Err(e) = reader.read_exact(&mut len_bytes).await {
-                        log::warn!("[{}] I/O beim Lesen der Länge: {:?}", port_name, e);
-                        break 'inner;
-                    }
-                    let len = u16::from_be_bytes(len_bytes) as usize;
-                    if len == 0 || len > MAX_PAYLOAD {
-                        log::warn!(
-                            "[{}] Unplausible Länge {} (max {}), resync…",
-                            port_name,
-                            len,
-                            MAX_PAYLOAD
-                        );
-                        continue 'inner;
-                    }
-                    log::debug!("[{}] Framing-Länge: {} Bytes", port_name, len);
-
-                    // ——— 4) Lese Payload ———
+                    // 3) Lese genau `len` Payload-Bytes
                     let mut payload = vec![0u8; len];
                     if let Err(e) = reader.read_exact(&mut payload).await {
-                        log::warn!("[{}] I/O beim Lesen des Payloads: {:?}", port_name, e);
-                        break 'inner;
+                        log::warn!("[{}] I/O-Error beim Lesen des Payloads: {:?}", port_name, e);
+                        break;
                     }
 
-                    // ——— 5) Protobuf dekodieren ———
+                    // 4) Prost-Decode
                     match mesh_proto::FromRadio::decode(&*payload) {
                         Ok(msg) => {
                             if let Some(variant) = msg.payload_variant {
@@ -131,11 +111,11 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                     }
                 }
 
-                log::info!("[{}] Inner Loop beendet, reconnect in 2 Sekunden…", port_name);
+                log::info!("[{}] Loop beendet, reconnect in 2s…", port_name);
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
             Err(e) => {
-                log::warn!("[{}] Öffnen fehlgeschlagen: {:?}, retry in 2 Sekunden…", port_name, e);
+                log::warn!("[{}] Öffnen fehlgeschlagen: {:?}, retry in 2s…", port_name, e);
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
