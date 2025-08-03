@@ -1,12 +1,8 @@
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/
-//
+// 
 // src/port_handler.rs
-
-// src/port_handler.rs
-
-// MPL-Header unverändert…
 
 use tokio_serial::{SerialPortBuilderExt, DataBits, Parity, StopBits, FlowControl};
 use tokio::sync::mpsc::UnboundedSender;
@@ -24,7 +20,7 @@ const MIN_FRAME: usize =   1;   // Minimal plausibles Paket
 
 pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
     loop {
-        log::info!("Öffne {} mit {} Baud (Raw-Proto)…", port_name, BAUDRATE);
+        log::info!("Öffne {} mit {} Baud (Meshtastic-Protobuf)…", port_name, BAUDRATE);
         let builder = tokio_serial::new(&port_name, BAUDRATE)
             .data_bits(DataBits::Eight)
             .parity(Parity::None)
@@ -33,25 +29,37 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
 
         match builder.open_native_async() {
             Ok(port) => {
-                log::info!("[{}] Port geöffnet, lese TLV-Frames…", port_name);
+                log::info!("[{}] Port geöffnet, lese Meshtastic-Frames…", port_name);
                 let mut reader = BufReader::new(port);
 
                 loop {
-                    // === 1) Lese 2-Byte-Prefix (Little-Endian) ===
-                    let mut prefix = [0u8; 2];
-                    if let Err(e) = reader.read_exact(&mut prefix).await {
-                        log::warn!("[{}] EOF oder I/O-Error beim Lesen des Prefix: {:?}", port_name, e);
+                    // === 1) Header lesen (4 Bytes, Big-Endian framing) ===
+                    let mut header = [0u8; 4];
+                    if let Err(e) = reader.read_exact(&mut header).await {
+                        log::warn!("[{}] EOF/I/O-Error beim Header-Lesen: {:?}", port_name, e);
                         break;
                     }
-                    // Länge interpretieren
-                    let len = u16::from_le_bytes(prefix) as usize;
+                    log::debug!(
+                        "[{}] RAW HEADER: {:02X} {:02X} {:02X} {:02X}",
+                        port_name, header[0], header[1], header[2], header[3]
+                    );
+
+                    // 1a) Marker prüfen
+                    if header[0] != 0x94 || header[1] != 0xC3 {
+                        log::warn!(
+                            "[{}] Ungültiger Header-Marker {:02X}{:02X}, resync…",
+                            port_name, header[0], header[1]
+                        );
+                        continue;
+                    }
+
+                    // 1b) Länge aus Big-Endian-Bytes extrahieren
+                    let len = u16::from_be_bytes([header[2], header[3]]) as usize;
                     if !(MIN_FRAME..=MAX_FRAME).contains(&len) {
                         log::warn!(
                             "[{}] Ungültige Länge {} (außerhalb {}–{}), resync…",
                             port_name, len, MIN_FRAME, MAX_FRAME
                         );
-                        // Wir schieben hier nicht extra Byte-weise zurück—
-                        // wir versuchen einfach, neu zu lesen.
                         continue;
                     }
                     log::debug!("[{}] Erkanntes Payload-Length: {} Bytes", port_name, len);
@@ -67,6 +75,7 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                     match mesh_proto::FromRadio::decode(&*payload) {
                         Ok(msg) => {
                             if let Some(variant) = msg.payload_variant {
+                                // 4) Event erzeugen und senden
                                 let event = match variant {
                                     PayloadVariant::Packet(p) => {
                                         log::info!(
@@ -81,10 +90,7 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                                         Event { port: port_name.clone(), event_type: ty }
                                     }
                                     PayloadVariant::NodeInfo(info) => {
-                                        log::info!(
-                                            "[{}] Protobuf NodeInfo: node_id={}",
-                                            port_name, info.num
-                                        );
+                                        log::info!("[{}] NodeInfo: node_id={}", port_name, info.num);
                                         Event {
                                             port:       port_name.clone(),
                                             event_type: EventType::NodeInfo { node_id: info.num },
@@ -110,7 +116,7 @@ pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
             Err(e) => {
-                log::warn!("[{}] Öffnen fehlgeschlagen: {:?}, retry in 2s…", port_name, e);
+                log::warn!("[{}] Port-Öffnen fehlgeschlagen: {:?}, retry in 2s…", port_name, e);
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
