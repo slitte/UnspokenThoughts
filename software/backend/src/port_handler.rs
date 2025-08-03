@@ -4,179 +4,115 @@
 // 
 // src/port_handler.rs
 
-// src/port_handler.rs
+use std::sync::Arc;
+use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::sync::{mpsc::UnboundedSender, Mutex};
+use tokio::time::{sleep, Duration};
+use tokio_stream::StreamExt;
+use tokio_serial::SerialPortBuilderExt;
+use tokio_util::codec::{FramedRead, LinesCodec};
 
-use tokio_serial::{SerialPortBuilderExt, DataBits, Parity, StopBits, FlowControl};
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
-use prost::Message;
-use std::{io, time::Duration};
+use crate::event::Event;
+use crate::message::{MeshMessage, PortMessage};
 
-use crate::{Event, mesh_proto};
-use crate::event::EventType;
-use crate::mesh_proto::from_radio::PayloadVariant;
+pub struct PortHandler {
+    port_name: String,
+    sender: UnboundedSender<Event>,
+}
 
-const BAUDRATE: u32    = 115200;   // ← Prüfe hier unbedingt, ob dein Gerät wirklich mit 921600 spricht!
-const MAX_FRAME: usize = 1024;
-const MIN_FRAME: usize =   1;
+impl PortHandler {
+    pub fn new(port_name: String, sender: UnboundedSender<Event>) -> Self {
+        Self { port_name, sender }
+    }
 
-/// Synchronisiert bis zum nächsten 0x94C3-Header.
-/// Loggt Start, erste Bytes, und alle 1000 Bytes ein Zwischen-Update.
-async fn sync_to_header<R: AsyncRead + Unpin>(
-    reader: &mut BufReader<R>,
-    port_name: &str
-) -> io::Result<()> {
-    log::debug!("[{}] Beginne Header-Synchronisation…", port_name);
+    pub async fn run(&mut self) {
+        loop {
+            match tokio_serial::new(&self.port_name, 115200).open_native_async() {
+                Ok(port) => {
+                    log::info!("[{}] Verbunden", self.port_name);
 
-    // Erst mal zwei Bytes einlesen
-    let mut window = [0u8; 2];
-    reader.read_exact(&mut window).await?;
-    log::debug!(
-        "[{}] Erstes Fenster: {:02X}{:02X}",
-        port_name,
-        window[0],
-        window[1]
-    );
+                    let (reader, writer) = tokio::io::split(port);
+                    let framed = FramedRead::new(reader, LinesCodec::new());
+                    let writer = Arc::new(Mutex::new(BufWriter::new(writer)));
 
-    let mut bytes_seen = 2usize;
-    // Schiebe so lange, bis wir [0x94, 0xC3] haben
-    while window != [0x94, 0xC3] {
-        // Neues Byte ans Ende holen
-        reader.read_exact(&mut window[1..2]).await?;
-        window[0] = window[1];
-        bytes_seen += 1;
+                    // NodeInfo-Task starten
+                    let writer_clone = Arc::clone(&writer);
+                    let port_name_clone = self.port_name.clone();
+                    tokio::spawn(async move {
+                        let mut interval = tokio::time::interval(Duration::from_secs(600));
+                        loop {
+                            interval.tick().await;
+                            let cmd = b"{\"request\": \"node_info\"}\n";
 
-        if bytes_seen % 1000 == 0 {
-            log::debug!(
-                "[{}] Noch kein Header nach {} Bytes, aktuelles Fenster: {:02X}{:02X}",
-                port_name,
-                bytes_seen,
-                window[0],
-                window[1]
-            );
+                            let mut w = writer_clone.lock().await;
+                            if let Err(e) = w.write_all(cmd).await {
+                                log::warn!("[{}] Fehler beim Schreiben: {:?}", port_name_clone, e);
+                                break;
+                            }
+                            if let Err(e) = w.flush().await {
+                                log::warn!("[{}] Fehler beim Flush: {:?}", port_name_clone, e);
+                                break;
+                            }
+
+                            log::info!("[{}] NodeInfo angefragt", port_name_clone);
+                        }
+                    });
+
+                    // Lesen starten
+                    if let Err(e) = self.read_loop(framed).await {
+                        log::warn!("[{}] Lesefehler: {:?}", self.port_name, e);
+                    }
+                }
+                Err(e) => {
+                    log::warn!("[{}] Öffnen fehlgeschlagen: {:?}", self.port_name, e);
+                    sleep(Duration::from_secs(2)).await;
+                }
+            }
         }
     }
 
-    log::debug!(
-        "[{}] Header gefunden nach {} Bytes: {:02X}{:02X}",
-        port_name,
-        bytes_seen,
-        window[0],
-        window[1]
-    );
-    Ok(())
-}
-
-pub async fn read_port(port_name: String, tx: UnboundedSender<Event>) {
-    loop {
-        log::info!("Öffne {} mit {} Baud (Meshtastic-Protobuf)…", port_name, BAUDRATE);
-        let builder = tokio_serial::new(&port_name, BAUDRATE)
-            .data_bits(DataBits::Eight)
-            .parity(Parity::None)
-            .stop_bits(StopBits::One)
-            .flow_control(FlowControl::None);
-
-        match builder.open_native_async() {
-            Ok(port) => {
-                log::info!("[{}] Port geöffnet, lese Meshtastic-Frames…", port_name);
-                let mut reader = BufReader::new(port);
-
-                loop {
-                    // ——— 1) Header-Sync ———
-                    if let Err(e) = sync_to_header(&mut reader, &port_name).await {
-                        log::warn!("[{}] Fehler beim Header-Sync: {:?}", port_name, e);
-                        break;
-                    }
-
-                    // ——— 2) Länge aus den nächsten 2 Bytes (Big-Endian) ———
-                    let mut len_bytes = [0u8; 2];
-                    if let Err(e) = reader.read_exact(&mut len_bytes).await {
-                        log::warn!(
-                            "[{}] EOF/I/O-Error beim Length-Read: {:?}, breche Loop…",
-                            port_name,
-                            e
-                        );
-                        break;
-                    }
-                    let len = u16::from_be_bytes(len_bytes) as usize;
-                    log::debug!(
-                        "[{}] Gelesene Payload-Länge: {} (Bytes {:02X}{:02X})",
-                        port_name,
-                        len,
-                        len_bytes[0],
-                        len_bytes[1]
-                    );
-                    if !(MIN_FRAME..=MAX_FRAME).contains(&len) {
-                        log::warn!(
-                            "[{}] Ungültige Länge {} (außerhalb {}–{}), resync…",
-                            port_name,
-                            len,
-                            MIN_FRAME,
-                            MAX_FRAME
-                        );
+    async fn read_loop<S>(&mut self, mut lines: FramedRead<S, LinesCodec>) -> tokio::io::Result<()>
+    where
+        S: tokio::io::AsyncRead + Unpin,
+    {
+        while let Some(line) = lines.next().await {
+            match line {
+                Ok(text) => {
+                    if text.trim().is_empty() {
                         continue;
                     }
 
-                    // ——— 3) Payload lesen ———
-                    let mut payload = vec![0u8; len];
-                    if let Err(e) = reader.read_exact(&mut payload).await {
-                        log::warn!("[{}] I/O-Error beim Payload-Lesen: {:?}", port_name, e);
-                        break;
-                    }
+                   let parsed = serde_json::from_str::<MeshMessage>(&text).ok();
 
-                    // ——— 4) Protobuf dekodieren & Event bauen ———
-                    match mesh_proto::FromRadio::decode(&*payload) {
-                        Ok(msg) => {
-                            if let Some(variant) = msg.payload_variant {
-                                let event = match variant {
-                                    PayloadVariant::Packet(p) => {
-                                        log::info!(
-                                            "[{}] Packet: from={} to={} hop_limit={}",
-                                            port_name, p.from, p.to, p.hop_limit
-                                        );
-                                        let ty = if p.hop_limit > 0 {
-                                            EventType::RelayedMesh { from: p.from, to: p.to }
-                                        } else {
-                                            EventType::DirectMesh { from: p.from, to: p.to }
-                                        };
-                                        Event { port: port_name.clone(), event_type: ty }
-                                    }
-                                    PayloadVariant::NodeInfo(info) => {
-                                        log::info!(
-                                            "[{}] NodeInfo: node_id={}", port_name, info.num
-                                        );
-                                        Event {
-                                            port:       port_name.clone(),
-                                            event_type: EventType::NodeInfo { node_id: info.num },
-                                        }
-                                    }
-                                    _ => {
-                                        log::debug!("[{}] Unbehandelter Variant", port_name);
-                                        Event { port: port_name.clone(), event_type: EventType::Unknown }
-                                    }
-                                };
-                                let _ = tx.send(event);
-                            } else {
-                                log::debug!("[{}] Nachricht ohne PayloadVariant", port_name);
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("[{}] Prost-Decode-Error: {:?}", port_name, e);
-                        }
-                    }
+// Falls Textnachricht enthalten → eigenen Event senden
+if let Some(parsed_msg) = &parsed {
+    if let Some(text_msg) = &parsed_msg.text {
+        let _ = self.sender.send(Event::TextMessage {
+            port: self.port_name.clone(),
+            message: text_msg.clone(),
+        });
+        continue;
+    }
+}
+
+                    // Fallback: alles andere als MeshMessage weiterleiten
+                    let msg = PortMessage {
+                        port: self.port_name.clone(),
+                        raw: text,
+                        parsed,
+                    };
+                    let _ = self.sender.send(Event::MeshMessage(msg));
                 }
-
-                log::info!("[{}] Lese-Loop beendet, reconnect in 2s…", port_name);
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-            Err(e) => {
-                log::warn!(
-                    "[{}] Port-Öffnen fehlgeschlagen: {:?}, retry in 2s…",
-                    port_name,
-                    e
-                );
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                Err(e) => {
+                    let _ = self.sender.send(Event::Error(format!(
+                        "[{}] Lese- oder Decodefehler: {:?}",
+                        self.port_name, e
+                    )));
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
+                }
             }
         }
+
+        Ok(())
     }
 }
