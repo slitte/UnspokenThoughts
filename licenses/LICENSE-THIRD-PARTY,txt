@@ -1,0 +1,128 @@
+# Third Party Licenses
+
+This project includes open source software from the following third-party packages. Each package is distributed under its respective license, as listed below.
+
+---
+
+## MIT OR Apache-2.0
+
+- addr2line
+- anstream
+- anstyle
+- anstyle-parse
+- anstyle-query
+- anstyle-wincon
+- autocfg
+- backtrace
+- bitflags
+- cfg-if
+- colorchoice
+- core-foundation
+- core-foundation-sys
+- env_filter
+- env_logger
+- futures
+- futures-channel
+- futures-core
+- futures-executor
+- futures-io
+- futures-macro
+- futures-sink
+- futures-task
+- futures-util
+- gimli
+- io-kit-sys
+- io-uring
+- is_terminal_polyfill
+- itoa
+- libc
+- lock_api
+- log
+- object
+- once_cell_polyfill
+- parking_lot
+- parking_lot_core
+- pin-project-lite
+- pin-utils
+- portable-atomic
+- portable-atomic-util
+- proc-macro2
+- quote
+- regex
+- regex-automata
+- regex-syntax
+- rustc-demangle
+- scopeguard
+- serde
+- serde_derive
+- serde_json
+- signal-hook-registry
+- smallvec
+- socket2
+- syn
+- thiserror
+- thiserror-impl
+- utf8parse
+- winapi
+- winapi-i686-pc-windows-gnu
+- winapi-x86_64-pc-windows-gnu
+- windows-sys
+- windows-targets
+- windows_aarch64_gnullvm
+- windows_aarch64_msvc
+- windows_i686_gnu
+- windows_i686_gnullvm
+- windows_i686_msvc
+- windows_x86_64_gnu
+- windows_x86_64_gnullvm
+- windows_x86_64_msvc
+
+## MIT
+
+- bytes
+- cfg_aliases
+- mio
+- mio-serial
+- nix
+- redox_syscall
+- slab
+- tokio
+- tokio-macros
+- tokio-serial
+- tokio-stream
+- tokio-util
+
+## MIT OR Unlicense
+
+- aho-corasick
+- jiff
+- jiff-static
+- memchr
+
+## MPL-2.0
+
+- serialport
+- UnspokenThoughts (this project)
+
+## GPL-3.0 OR MIT
+
+- unescaper
+
+> **Note:**  
+> For "GPL-3.0 OR MIT" (unescaper), you may choose either license. To keep your project non-GPL, you must comply with the terms of the MIT license for that crate.
+
+## Others
+
+- unicode-ident: (Apache-2.0 OR MIT) AND Unicode-3.0
+- adler2: 0BSD OR Apache-2.0 OR MIT
+- wasi: Apache-2.0 OR Apache-2.0 WITH LLVM-exception OR MIT
+- mach2: Apache-2.0 OR BSD-2-Clause OR MIT
+- ryu: Apache-2.0 OR BSL-1.0
+- miniz_oxide: Apache-2.0 OR MIT OR Zlib
+
+
+---
+
+## License Choices / Clarification
+
+Where a crate offers multiple license choices (e.g., MIT OR GPL-3.0), this project chooses the most permissive option (MIT or Apache 2.0), unless otherwise noted.

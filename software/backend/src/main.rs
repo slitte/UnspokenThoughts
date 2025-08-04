@@ -23,7 +23,9 @@ use logging::init_logging;
 use std::fs::OpenOptions;
 use std::io::Write;
 
-
+mod mesh_proto {
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/proto-rs/meshtastic.rs"));
+}
 const PORTS: [&str; 1] = [
     "/dev/UT_Long-Fast"];
 
@@ -40,12 +42,6 @@ async fn main() {
         .append(true)
         .open("/home/schlitte/event_log.txt")
         .expect("Konnte event_log.txt nicht öffnen");
-
-
-
-
-
-
 
 
 
